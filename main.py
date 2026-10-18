@@ -33,12 +33,7 @@ def parse_json_or_ndjson(raw):
     try:
         return json.loads(text)
     except json.JSONDecodeError:
-        rows = []
-        for line in text.splitlines():
-            line = line.strip()
-            if line:
-                rows.append(json.loads(line))
-        return rows
+        return [json.loads(line) for line in text.splitlines() if line.strip()]
 
 @app.on_event("startup")
 def load_data():
@@ -56,9 +51,7 @@ def load_data():
     latest = {}
     for order in raw_orders:
         oid = order.get("id")
-        if not oid:
-            continue
-        if oid not in latest or order.get("updated_at", "") > latest[oid].get("updated_at", ""):
+        if oid and (oid not in latest or order.get("updated_at", "") > latest[oid].get("updated_at", "")):
             latest[oid] = order
     orders = list(latest.values())
     rates = parse_json_or_ndjson(fetch_bytes(links["rates"]))
@@ -79,14 +72,12 @@ def order_date(order):
 def usd_amount(order):
     currency = order.get("currency", "USD")
     per_unit = rates.get("usd_per_unit", {})
-    rate = float(per_unit.get(currency, 1))
-    return float(order.get("amount", 0)) * rate
+    return float(order.get("amount", 0)) * float(per_unit.get(currency, 1))
 
 def parse_filters(question):
     q = question.lower()
     result = {"region": None, "product": None, "customer": None, "month": None, "year": None, "status": None}
-    regions = ["central", "east", "north", "south", "west"]
-    for region in regions:
+    for region in ["central", "east", "north", "south", "west"]:
         if re.search(r"\b" + region + r"\b", q):
             result["region"] = region.title()
             break
@@ -98,9 +89,8 @@ def parse_filters(question):
     if customer:
         result["customer"] = customer.group(0).upper()
     months = {
-        "january": 1, "february": 2, "march": 3, "april": 4,
-        "may": 5, "june": 6, "july": 7, "august": 8,
-        "september": 9, "october": 10, "november": 11, "december": 12
+        "january": 1, "february": 2, "march": 3, "april": 4, "may": 5, "june": 6,
+        "july": 7, "august": 8, "september": 9, "october": 10, "november": 11, "december": 12
     }
     for name, number in months.items():
         if re.search(r"\b" + name + r"\b", q):
@@ -113,9 +103,7 @@ def parse_filters(question):
         result["status"] = "refunded"
     elif "void" in q or "voided" in q:
         result["status"] = "void"
-    elif "paid" in q:
-        result["status"] = "paid"
-    elif any(word in q for word in ["revenue", "sales", "sold", "spend", "spent", "income"]):
+    elif "paid" in q or any(word in q for word in ["revenue", "sales", "sold", "spend", "spent", "income"]):
         result["status"] = "paid"
     return result
 
@@ -131,24 +119,24 @@ def filtered_orders(question):
             continue
         d = order_date(o)
         if f["month"] or f["year"]:
-            if d is None:
-                continue
-            if f["month"] and d.month != f["month"]:
-                continue
-            if f["year"] and d.year != f["year"]:
+            if d is None or (f["month"] and d.month != f["month"]) or (f["year"] and d.year != f["year"]):
                 continue
         if f["status"] and o.get("status") != f["status"]:
             continue
         selected.append(o)
-    return selected, f
+    return selected
 
 def answer_question(question):
     q = question.lower()
     if not orders:
         raise RuntimeError("Ledger data is not loaded; check the LEDGER_URL setting.")
-    selected, filters = filtered_orders(question)
+    selected = filtered_orders(question)
 
-    # Grouping/ranking questions
+    # Detect average questions before total-revenue questions.
+    if (("average" in q or "mean" in q) and any(word in q for word in ["order", "value", "amount", "spend", "purchase"])):
+        paid = [o for o in selected if o.get("status") == "paid"]
+        return round(sum(usd_amount(o) for o in paid) / len(paid), 2) if paid else 0
+
     if any(x in q for x in ["top product", "best-selling product", "best selling product", "most sold product", "which product sold the most", "highest-selling product", "highest selling product"]):
         groups = defaultdict(float)
         for o in selected:
@@ -163,26 +151,23 @@ def answer_question(question):
                 groups[o.get("customer", "")] += usd_amount(o)
         return max(groups, key=groups.get) if groups else "No matching records"
 
-    if any(x in q for x in ["how many", "number of orders", "count of orders", "count orders", "how many orders"]):
+    if any(x in q for x in ["how many", "number of orders", "count of orders", "count orders"]):
         return len(selected)
 
     if any(x in q for x in ["units sold", "quantity sold", "total quantity", "how many units", "number of units"]):
         return sum(float(o.get("qty", 0)) for o in selected if o.get("status") == "paid")
 
-    if any(x in q for x in ["average order", "average value", "mean order"]):
-        paid = [o for o in selected if o.get("status") == "paid"]
-        return round(sum(usd_amount(o) for o in paid) / len(paid), 2) if paid else 0
-
     if any(x in q for x in ["refund", "refunded"]):
-        total = sum(usd_amount(o) for o in selected if o.get("status") == "refunded")
+        refunded = [o for o in selected if o.get("status") == "refunded"]
         if any(x in q for x in ["how many", "count", "number of"]):
-            return sum(1 for o in selected if o.get("status") == "refunded")
-        return round(total, 2)
+            return len(refunded)
+        return round(sum(usd_amount(o) for o in refunded), 2)
 
     if any(x in q for x in ["void", "voided"]):
+        voided = [o for o in selected if o.get("status") == "void"]
         if any(x in q for x in ["how many", "count", "number of"]):
-            return sum(1 for o in selected if o.get("status") == "void")
-        return round(sum(usd_amount(o) for o in selected if o.get("status") == "void"), 2)
+            return len(voided)
+        return round(sum(usd_amount(o) for o in voided), 2)
 
     if any(x in q for x in ["revenue", "sales", "sales total", "total sales", "income", "spent", "spend", "paid amount"]):
         return round(sum(usd_amount(o) for o in selected if o.get("status") == "paid"), 2)
@@ -193,7 +178,6 @@ def answer_question(question):
     if "product" in q and any(x in q for x in ["how many", "number of", "count", "unique", "list"]):
         return sorted({o.get("product") for o in selected if o.get("product")})
 
-    # Conservative fallback: count matching rows rather than inventing a result.
     return len(selected)
 
 @app.get("/")
@@ -203,7 +187,6 @@ def root():
 @app.post("/answer")
 def answer(payload: Question):
     try:
-        result = answer_question(payload.question)
-        return {"answer": result}
+        return {"answer": answer_question(payload.question)}
     except Exception as exc:
         raise HTTPException(status_code=503, detail=str(exc))
