@@ -137,7 +137,15 @@ def answer_question(question):
         paid = [o for o in selected if o.get("status") == "paid"]
         return round(sum(usd_amount(o) for o in paid) / len(paid), 2) if paid else 0
 
-    if any(x in q for x in ["top product", "best-selling product", "best selling product", "most sold product", "which product sold the most", "highest-selling product", "highest selling product"]):
+    # Product rankings by revenue must be handled before the generic revenue total.
+    if ("product" in q and any(term in q for term in ["top-selling", "top selling", "best-selling", "best selling", "highest-selling", "highest selling", "most revenue", "highest revenue", "by revenue"])):
+        groups = defaultdict(float)
+        for o in selected:
+            if o.get("status") == "paid":
+                groups[o.get("product", "")] += usd_amount(o)
+        return max(groups, key=groups.get) if groups else "No matching records"
+
+    if any(x in q for x in ["top product", "best-selling product", "best selling product", "most sold product", "which product sold the most", "highest-selling product", "highest selling product", "top-selling product", "top selling product"]):
         groups = defaultdict(float)
         for o in selected:
             if o.get("status") == "paid":
